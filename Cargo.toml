@@ -1,0 +1,6 @@
+[package]
+name = "flat-hash-map"
+version = "0.1.0"
+authors = ["delma <delma@del.ma>"]
+
+[dependencies]
