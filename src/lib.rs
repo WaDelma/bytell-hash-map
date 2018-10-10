@@ -59,11 +59,11 @@ impl Metadata {
 impl fmt::Debug for Metadata {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         if self.is_empty() {
-            fmt.write_str("---")
+            fmt.write_str("~--")
         } else if self.is_storage() {
-            write!(fmt, "S{:02x}", self.jump_length())
+            write!(fmt, "<{:02x}", self.jump_length())
         } else {
-            write!(fmt, "d{:02x}", self.jump_length())
+            write!(fmt, "|{:02x}", self.jump_length())
         }
     }
 }
@@ -133,12 +133,14 @@ impl<K, V, H> FlatHashMap<K, V, H>
     // TODO: Reallocate if when load factor is surpassed
     pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
         let mut hash = self.hash(&key) as usize;
+        println!("Insert {:?} to {:?}", key, split_hash(hash, self.capacity));
         unsafe {
             let mut cur_meta = &mut Metadata::default();
             let mut data_ptr = ptr::null_mut();
             self.mut_data(hash, &mut cur_meta, &mut data_ptr);
 
             if cur_meta.is_empty() {
+                println!("Empty");
                 cur_meta.set_storage(false);
                 cur_meta.set_jump(0);
                 ptr::write(data_ptr, Entry {
@@ -147,6 +149,7 @@ impl<K, V, H> FlatHashMap<K, V, H>
                 });
                 return None;
             } else if cur_meta.is_storage() {
+                println!("Storage");
                 let mut their_hash = self.hash(&(*data_ptr).key) as usize;
                 assert!({
                     let mut cur_meta = &mut Metadata::default();
@@ -165,45 +168,42 @@ impl<K, V, H> FlatHashMap<K, V, H>
                     assert!(before_meta.jump_length() != 0);
                     their_hash += JUMP_DISTANCES[before_meta.jump_length() as usize];
                 }
+                println!("Previous: {:?}", split_hash(prev_hash, self.capacity));
                 self.mut_data(prev_hash, &mut prev_meta, &mut ptr::null_mut());
-                let hash = prev_hash;
+                // TODO: Clean the following
+                let mut hash = prev_hash;
 
                 let mut next = prev_hash;
                 let mut next_jump = cur_meta.jump_length();
 
                 let mut entry = ptr::read(data_ptr);
-                cur_meta.set_empty();
+                // cur_meta.set_empty(); TODO: Move this after finding new place
 
                 let mut jump = prev_meta.jump_length() + 1;
+                loop {
+                    if let Some((mut relocate_data_ptr, jumps)) = self.find_empty(hash, jump, &mut relocate_meta) {
+                        relocate_meta.set_storage(true);
+                        relocate_meta.set_jump(0);
+                        prev_meta.set_jump(jumps);
+                        ptr::write(relocate_data_ptr, entry);
+                        jump = 1;
 
-                let mut relocate_data_ptr = ptr::null_mut();
-                'outer: loop {
-                    for jumps in jump..126 {
-                        let new_hash = hash.wrapping_add(JUMP_DISTANCES[jumps as usize]);
-                        self.mut_data(new_hash, &mut relocate_meta, &mut relocate_data_ptr);
-
-                        if relocate_meta.is_empty() {
-                            relocate_meta.set_storage(true);
-                            relocate_meta.set_jump(0);
-                            prev_meta.set_jump(jumps);
-                            ptr::write(relocate_data_ptr, entry);
-                            jump = 0;
-
-                            if next_jump == 0 {
-                                break 'outer;
-                            }
-                            next += JUMP_DISTANCES[next_jump as usize];
-                            self.mut_data(next, &mut relocate_meta, &mut relocate_data_ptr);
-                            next_jump = relocate_meta.jump_length();
-                            entry = ptr::read(relocate_data_ptr);
-                            relocate_meta.set_empty();
-                            mem::swap(&mut relocate_meta, &mut prev_meta);
-                            continue 'outer;
+                        if next_jump == 0 {
+                            break;
                         }
+                        hash += JUMP_DISTANCES[jumps as usize];
+                        next += JUMP_DISTANCES[next_jump as usize];
+                        self.mut_data(next, &mut relocate_meta, &mut relocate_data_ptr);
+                        next_jump = relocate_meta.jump_length();
+                        entry = ptr::read(relocate_data_ptr);
+                        relocate_meta.set_empty();
+                        mem::swap(&mut relocate_meta, &mut prev_meta);
+                        continue;
+                    } else {
+                        self.reallocate();
+                        self.insert(entry.key, entry.value);
+                        return self.insert(key, value);
                     }
-                    self.reallocate();
-                    self.insert(entry.key, entry.value);
-                    return self.insert(key, value);
                 }
                 cur_meta.set_storage(false);
                 cur_meta.set_jump(0);
@@ -213,41 +213,54 @@ impl<K, V, H> FlatHashMap<K, V, H>
                 });
                 return None;
             }
+            println!("Direct");
             loop {
                 assert!(!cur_meta.is_empty());
                 let data = &mut *data_ptr;
                 if data.key == key {
+                    println!("Update");
                     let value_ptr = (&mut data.value) as *mut _;
                     return Some((key, ptr::replace(value_ptr, value)));
                 }
                 let jump = cur_meta.jump_length();
                 if jump == 0 {
+                    println!("Adding to the end");
                     let prev_meta = cur_meta;
                     let mut cur_meta = &mut Metadata::default();
-                    for jumps in 1..126 {
-                        let new_hash = hash.wrapping_add(JUMP_DISTANCES[jumps as usize]);
-
-                        self.mut_data(new_hash, &mut cur_meta, &mut data_ptr);
-
-                        if cur_meta.is_empty() {
-                            cur_meta.set_storage(true);
-                            cur_meta.set_jump(0);
-                            prev_meta.set_jump(jumps);
-                            ptr::write(data_ptr, Entry {
-                                key,
-                                value
-                            });
-                            return None;
-                        }
-                    }
-                    self.reallocate();
-                    return self.insert(key, value);
+                    return if let Some((data_ptr, jumps)) = self.find_empty(hash, 1, &mut cur_meta) {
+                        cur_meta.set_storage(true);
+                        cur_meta.set_jump(0);
+                        prev_meta.set_jump(jumps);
+                        ptr::write(data_ptr, Entry {
+                            key,
+                            value
+                        });
+                        None
+                    } else {
+                        self.reallocate();
+                        self.insert(key, value)
+                    };
                 }
                 hash += JUMP_DISTANCES[jump as usize];
 
                 self.mut_data(hash, &mut cur_meta, &mut data_ptr);
             }
         }
+    }
+
+    fn find_empty<'a, 'b>(&mut self, hash: usize, start: u8, meta: &'b mut &'a mut Metadata) -> Option<(*mut Entry<K, V>, u8)> {
+        let mut data_ptr = ptr::null_mut();
+        for jumps in (start as usize)..JUMP_DISTANCES.len() {
+            let new_hash = hash.wrapping_add(JUMP_DISTANCES[jumps]);
+
+            self.mut_data(new_hash, meta, &mut data_ptr);
+
+            if meta.is_empty() {
+                println!("Found empty at {:?} after jumping: {}", split_hash(new_hash, self.capacity), jumps);
+                return Some((data_ptr, jumps as u8));
+            }
+        }
+        None
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
@@ -264,6 +277,9 @@ impl<K, V, H> FlatHashMap<K, V, H>
                 let data = &*data_ptr;
                 if &data.key == key {
                     return Some(&data.value);
+                }
+                if cur_meta.is_empty() {
+                    self.debug()
                 }
                 let jump = cur_meta.jump_length();
                 if jump == 0 {
@@ -302,6 +318,7 @@ impl<K, V, H> FlatHashMap<K, V, H>
     }
 
     fn reallocate(&mut self) {
+        println!("START REALLOCATE");
         let old_capacity = self.capacity;
         let new_capacity = 2 * self.capacity;
         self.capacity = new_capacity;
@@ -331,6 +348,8 @@ impl<K, V, H> FlatHashMap<K, V, H>
             }
             drop(Vec::from_raw_parts(old_ptr, 0, old_capacity))
         }
+        self.debug();
+        println!("REALLOCATED");
     }
 
     fn hash(&self, key: &K) -> u64 {
@@ -366,9 +385,10 @@ impl<K, V, H> FlatHashMap<K, V, H>
 
     fn debug(&self) {
         unsafe {
+            let numbers = (self.capacity as f32).log(10.) as usize + 1;
             for cell in 0..self.capacity {
                 let cur_cell = self.ptr.offset(cell as isize);
-                print!("{:2} ", cell);
+                print!("{:w$} ", cell, w = numbers);
                 for slot in 0..16 {
                     print!("{:?}", (*cur_cell).meta.0[slot]);
                 }
@@ -390,7 +410,7 @@ fn split_hash(hash: usize, capacity: usize) -> (isize, usize) {
 
 #[test]
 fn adding_one_works() {
-    let max = 1000;
+    let max = 100000;
     for n in 0..max {
         let mut map = FlatHashMap::new(::fnv::FnvBuildHasher::default());
         map.insert(n, n);
@@ -404,6 +424,7 @@ fn adding_multiple_works() {
     let mut map = FlatHashMap::new(::fnv::FnvBuildHasher::default());
     for n in 0..max {
         map.insert(n, n);
+        map.debug();
         for n in 0..=n {
             assert_eq!(Some(&n), map.get(&n));
         }
