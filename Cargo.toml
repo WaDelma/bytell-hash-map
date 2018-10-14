@@ -1,9 +1,18 @@
 [package]
-name = "flat-hash-map"
+name = "bytell-hash-map"
 version = "0.1.0"
 authors = ["delma <delma@del.ma>"]
 
 [dependencies]
 
 [dev-dependencies]
-fnv = "1.0.6"
+fnv = "1.0"
+rand = "0.5"
+criterion = "0.2"
+
+[[bench]]
+name = "bench"
+harness = false
+
+[lib]
+bench = false
