@@ -18,6 +18,7 @@ trait Map {
     fn with_capacity(capacity: usize) -> Self;
     fn insert(&mut self, k: u32, v: u32);
     fn get(&self, n: &u32) -> Option<&u32>;
+    fn remove(&mut self, n: &u32) -> bool;
 }
 
 impl Map for HashMap {
@@ -29,6 +30,9 @@ impl Map for HashMap {
     }
     fn get(&self, n: &u32) -> Option<&u32> {
         self.get(n)
+    }
+    fn remove(&mut self, n: &u32) -> bool {
+        self.remove(n).is_some()
     }
 }
 
@@ -42,9 +46,12 @@ impl Map for BytellHashMap {
     fn get(&self, n: &u32) -> Option<&u32> {
         self.get(n)
     }
+    fn remove(&mut self, n: &u32) -> bool {
+        self.remove(n).is_some()
+    }
 }
 
-fn get<H: Map>(b: &mut criterion::Bencher, max: u32) {
+fn get_hit<H: Map>(b: &mut criterion::Bencher, max: u32) {
     let mut map = H::with_capacity(max as usize);
     let mut rng = SmallRng::from_seed([0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 3, 5]);
     let mut numbers = (0..max).collect::<Vec<_>>();
@@ -56,6 +63,22 @@ fn get<H: Map>(b: &mut criterion::Bencher, max: u32) {
     b.iter(|| {
         for n in &numbers {
             black_box(map.get(n));
+        }
+    })
+}
+
+fn get_miss<H: Map>(b: &mut criterion::Bencher, max: u32) {
+    let mut map = H::with_capacity(max as usize);
+    let mut rng = SmallRng::from_seed([0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 3, 5]);
+    let mut numbers = (0..max).collect::<Vec<_>>();
+    rng.shuffle(&mut numbers);
+    for n in &numbers {
+        map.insert(2 * n, 2 * n);
+    }
+    rng.shuffle(&mut numbers);
+    b.iter(|| {
+        for n in &numbers {
+            black_box(map.get(&(2 * n + 1)));
         }
     })
 }
@@ -72,18 +95,48 @@ fn insert<H: Map>(b: &mut criterion::Bencher, max: u32) {
     })
 }
 
+fn remove<H: Map>(b: &mut criterion::Bencher, max: u32) {
+    let mut map = H::with_capacity(max as usize);
+    let mut rng = SmallRng::from_seed([0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 3, 5]);
+    let mut numbers = (0..max).collect::<Vec<_>>();
+    rng.shuffle(&mut numbers);
+    for n in &numbers {
+        map.insert(*n, *n);
+    }
+    rng.shuffle(&mut numbers);
+    b.iter(|| {
+        for n in &numbers {
+            black_box(map.remove(n));
+        }
+    })
+}
+
 fn criterion_benchmark(c: &mut Criterion) {
-    let checks = (1..).map(|n| n * 10000).take(40).collect::<Vec<_>>();
+    let max = 400_000;
+    let data_points = 40;
+    let checks = (1..).map(|n| n * (max / data_points)).take(data_points as usize).collect::<Vec<_>>();
     c.bench(
-        "get",
-        ParameterizedBenchmark::new("bytell-hash-map", |b, size| get::<BytellHashMap>(b, *size), checks.clone())
-            .with_function("hash-map", |b, size| get::<HashMap>(b, *size))
+        "get/hit",
+        ParameterizedBenchmark::new("bytell-hash-map", |b, size| get_hit::<BytellHashMap>(b, *size), checks.clone())
+            .with_function("hash-map", |b, size| get_hit::<HashMap>(b, *size))
+            .throughput(|n| Throughput::Elements(*n)),
+    );
+    c.bench(
+        "get/miss",
+        ParameterizedBenchmark::new("bytell-hash-map", |b, size| get_miss::<BytellHashMap>(b, *size), checks.clone())
+            .with_function("hash-map", |b, size| get_miss::<HashMap>(b, *size))
             .throughput(|n| Throughput::Elements(*n)),
     );
     c.bench(
         "insert",
-        ParameterizedBenchmark::new("bytell-hash-map", |b, size| insert::<BytellHashMap>(b, *size), checks)
+        ParameterizedBenchmark::new("bytell-hash-map", |b, size| insert::<BytellHashMap>(b, *size), checks.clone())
             .with_function("hash-map", |b, size| insert::<HashMap>(b, *size))
+            .throughput(|n| Throughput::Elements(*n)),
+    );
+    c.bench(
+        "remove",
+        ParameterizedBenchmark::new("bytell-hash-map", |b, size| remove::<BytellHashMap>(b, *size), checks)
+            .with_function("hash-map", |b, size| remove::<HashMap>(b, *size))
             .throughput(|n| Throughput::Elements(*n)),
     );
 }
