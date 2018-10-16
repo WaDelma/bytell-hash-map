@@ -8,6 +8,8 @@ use std::ptr;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::fmt;
 
+const BLOCK_SIZE: usize = 16;
+
 const JUMP_DISTANCES: [usize; 126] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 
@@ -40,6 +42,10 @@ impl Metadata {
     fn jump_length(&self) -> u8 {
         assert!(!self.is_empty());
         self.0 & 0b01111111
+    }
+    fn set_last(&mut self, storage: bool) {
+        self.set_storage(storage);
+        self.set_jump(0);
     }
     fn set_storage(&mut self, storage: bool) {
         if storage {
@@ -77,14 +83,23 @@ impl Default for Metadata {
 }
 
 #[derive(Default)]
-struct Metadatum([Metadata; 16]);
+struct Metadatum([Metadata; BLOCK_SIZE]);
 
 struct Entry<K, V> {
     key: K,
     value: V
 }
 
-struct Datum<K, V>([Entry<K, V>; 16]);
+impl<K, V> Entry<K, V> {
+    fn new(key: K, value: V) -> Self {
+        Entry {
+            key,
+            value
+        }
+    }
+}
+
+struct Datum<K, V>([Entry<K, V>; BLOCK_SIZE]);
 
 struct Cell<K, V> {
     meta: Metadatum,
@@ -103,7 +118,7 @@ impl<K, V, H> Drop for HashMap<K, V, H> {
         unsafe {
             for cell in 0..self.capacity {
                 let cur_cell = self.ptr.offset(cell as isize);
-                for slot in 0..16 {
+                for slot in 0..BLOCK_SIZE {
                     if !(*cur_cell).meta.0[slot].is_empty() {
                         let datum_ptr = (*cur_cell).data.0.as_mut().as_mut_ptr();
                         datum_ptr.offset(slot as isize).drop_in_place();
@@ -142,7 +157,7 @@ impl<'a, K: 'a, V: 'a, H: 'a> Iterator for Iter<'a, K, V, H>
                 let cur_cell = self.0.ptr.offset(*cell as isize);
                 let cur_slot = *slot;
                 *slot += 1;
-                if *slot > 15 {
+                if *slot >= BLOCK_SIZE {
                     *slot = 0;
                     *cell += 1;
                 }
@@ -173,7 +188,7 @@ impl<'a, K: 'a, V: 'a, H: 'a> Iterator for IterMut<'a, K, V, H>
                 let cur_cell = self.0.ptr.offset(*cell as isize);
                 let cur_slot = *slot;
                 *slot += 1;
-                if *slot > 15 {
+                if *slot >= BLOCK_SIZE {
                     *slot = 0;
                     *cell += 1;
                 }
@@ -204,7 +219,7 @@ impl<K, V, H> HashMap<K, V, H>
     pub fn with_hasher(hasher: H) -> Self {
         let mut data = vec![Cell {
             meta: Metadatum::default(),
-            data: unsafe { mem::zeroed() }, // TODO: Uninitialize
+            data: unsafe { mem::uninitialized() }, // TODO: Uninitialize
         }];
         let ptr = data.as_mut_ptr();
         mem::forget(data);
@@ -217,13 +232,13 @@ impl<K, V, H> HashMap<K, V, H>
     }
 
     pub fn with_capacity(capacity: usize, hasher: H) -> Self {
-        let capacity = ((capacity as f32 / 16.).ceil() as usize).next_power_of_two();
+        let capacity = ((capacity as f32 / BLOCK_SIZE as f32).ceil() as usize).next_power_of_two();
         // TODO: This is inefficent
         let mut data = Vec::with_capacity(capacity);
         for _ in 0..capacity {
             data.push(Cell {
                 meta: Metadatum::default(),
-                data: unsafe { mem::zeroed() }, // TODO: Uninitialize
+                data: unsafe { mem::uninitialized() }, // TODO: Uninitialize
             });
         }
         let ptr = data.as_mut_ptr();
@@ -237,7 +252,7 @@ impl<K, V, H> HashMap<K, V, H>
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<(K, V)> {
-        if self.size as f32 / (16 * self.capacity) as f32 > 0.872 {
+        if self.size as f32 / (BLOCK_SIZE * self.capacity) as f32 > 0.872 {
             self.reallocate();
         }
         let mut hash = self.hash(&key) as usize;
@@ -247,12 +262,8 @@ impl<K, V, H> HashMap<K, V, H>
             self.mut_data(hash, &mut cur_meta, &mut data_ptr);
 
             if (*cur_meta).is_empty() {
-                (*cur_meta).set_storage(false);
-                (*cur_meta).set_jump(0);
-                ptr::write(data_ptr, Entry {
-                    key,
-                    value
-                });
+                (*cur_meta).set_last(false);
+                ptr::write(data_ptr, Entry::new(key, value));
                 self.size += 1;
                 return None;
             } else if (*cur_meta).is_storage() {
@@ -271,8 +282,7 @@ impl<K, V, H> HashMap<K, V, H>
                 loop {
                     if let Some((relocate_data_ptr, jumps)) = self.find_empty(cur_hash, first_jump, &mut relocate_meta) {
                         first_jump = 1;
-                        (*relocate_meta).set_storage(true);
-                        (*relocate_meta).set_jump(0);
+                        (*relocate_meta).set_last(true);
                         ptr::write(relocate_data_ptr, to_be_moved);
                         (*prev_meta).set_jump(jumps);
                         mem::swap(&mut prev_meta, &mut relocate_meta);
@@ -295,12 +305,8 @@ impl<K, V, H> HashMap<K, V, H>
                     }
                 }
                 self.mut_data(hash, &mut cur_meta, &mut data_ptr);
-                (*cur_meta).set_storage(false);
-                (*cur_meta).set_jump(0);
-                ptr::write(data_ptr, Entry {
-                    key,
-                    value
-                });
+                (*cur_meta).set_last(false);
+                ptr::write(data_ptr, Entry::new(key, value));
                 self.size += 1;
                 return None;
             }
@@ -316,13 +322,9 @@ impl<K, V, H> HashMap<K, V, H>
                     let prev_meta = cur_meta;
                     let mut cur_meta = ptr::null_mut();
                     return if let Some((data_ptr, jumps)) = self.find_empty(hash, 1, &mut cur_meta) {
-                        (*cur_meta).set_storage(true);
-                        (*cur_meta).set_jump(0);
+                        (*cur_meta).set_last(true);
                         (*prev_meta).set_jump(jumps);
-                        ptr::write(data_ptr, Entry {
-                            key,
-                            value
-                        });
+                        ptr::write(data_ptr, Entry::new(key, value));
                         self.size += 1;
                         None
                     } else {
@@ -339,11 +341,6 @@ impl<K, V, H> HashMap<K, V, H>
 
     unsafe fn find_previous(&self, target_hash: usize, data_ptr: *const Entry<K, V>) -> usize {
         let mut their_hash = self.hash(&(*data_ptr).key) as usize;
-        debug_assert!({
-            let mut cur_meta = ptr::null();
-            self.get_data(their_hash, &mut cur_meta, &mut ptr::null());
-            !(*cur_meta).is_storage()
-        });
         let mut prev_hash = 0;
         let mut before_meta = ptr::null();
         while split_hash(their_hash, self.capacity) != split_hash(target_hash, self.capacity) {
@@ -471,7 +468,7 @@ impl<K, V, H> HashMap<K, V, H>
         for _ in 0..new_capacity {
             data.push(Cell {
                 meta: Metadatum::default(),
-                data: unsafe { mem::zeroed() }, // TODO: Uninitialize
+                data: unsafe { mem::uninitialized() }, // TODO: Uninitialize
             });
         }
         let ptr = data.as_mut_ptr();
@@ -481,7 +478,7 @@ impl<K, V, H> HashMap<K, V, H>
         unsafe {
             for cell in 0..old_capacity {
                 let cur_cell = old_ptr.offset(cell as isize);
-                for slot in 0..16 {
+                for slot in 0..BLOCK_SIZE {
                     if !&(*cur_cell).meta.0[slot].is_empty() {
                         let datum_ptr = (*cur_cell).data.0.as_ref().as_ptr();
                         let data_ptr = datum_ptr.offset(slot as isize);
@@ -533,7 +530,7 @@ impl<K, V, H> HashMap<K, V, H>
             for cell in 0..self.capacity {
                 let cur_cell = self.ptr.offset(cell as isize);
                 print!("{:w$} ", cell, w = numbers);
-                for slot in 0..16 {
+                for slot in 0..BLOCK_SIZE {
                     print!("{:?}", (*cur_cell).meta.0[slot]);
                 }
                 print!(" ");
@@ -550,8 +547,8 @@ impl<K, V, H> HashMap<K, V, H>
 
 fn split_hash(hash: usize, capacity: usize) -> (isize, usize) {
     (
-        ((hash >> 4) & (capacity - 1)) as isize,
-        hash & 15
+        ((hash / BLOCK_SIZE) & (capacity - 1)) as isize,
+        hash & (BLOCK_SIZE - 1)
     )
 }
 
