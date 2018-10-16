@@ -151,8 +151,7 @@ impl<'a, K: 'a, V: 'a, H: 'a> Iterator for Iter<'a, K, V, H>
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
-            let cell = &mut self.1;
-            let slot = &mut self.2;
+            let (cell, slot) = (&mut self.1, &mut self.2);
             while *cell < self.0.capacity {
                 let cur_cell = self.0.ptr.offset(*cell as isize);
                 let cur_slot = *slot;
@@ -182,8 +181,7 @@ impl<'a, K: 'a, V: 'a, H: 'a> Iterator for IterMut<'a, K, V, H>
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
-            let cell = &mut self.1;
-            let slot = &mut self.2;
+            let (cell, slot) = (&mut self.1, &mut self.2);
             while *cell < self.0.capacity {
                 let cur_cell = self.0.ptr.offset(*cell as isize);
                 let cur_slot = *slot;
@@ -217,14 +215,8 @@ impl<K, V, H> HashMap<K, V, H>
           H: BuildHasher
 {
     pub fn with_hasher(hasher: H) -> Self {
-        let mut data = vec![Cell {
-            meta: Metadatum::default(),
-            data: unsafe { mem::uninitialized() }, // TODO: Uninitialize
-        }];
-        let ptr = data.as_mut_ptr();
-        mem::forget(data);
         HashMap {
-            ptr,
+            ptr: allocate(1),
             size: 0,
             capacity: 1,
             hasher
@@ -233,18 +225,8 @@ impl<K, V, H> HashMap<K, V, H>
 
     pub fn with_capacity(capacity: usize, hasher: H) -> Self {
         let capacity = ((capacity as f32 / BLOCK_SIZE as f32).ceil() as usize).next_power_of_two();
-        // TODO: This is inefficent
-        let mut data = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            data.push(Cell {
-                meta: Metadatum::default(),
-                data: unsafe { mem::uninitialized() }, // TODO: Uninitialize
-            });
-        }
-        let ptr = data.as_mut_ptr();
-        mem::forget(data);
         HashMap {
-            ptr,
+            ptr: allocate(capacity),
             size: 0,
             capacity,
             hasher
@@ -255,7 +237,7 @@ impl<K, V, H> HashMap<K, V, H>
         if self.size as f32 / (BLOCK_SIZE * self.capacity) as f32 > 0.872 {
             self.reallocate();
         }
-        let mut hash = self.hash(&key) as usize;
+        let mut hash = self.hash(&key) as usize; // NOTE: Possible panic
         unsafe {
             let mut cur_meta = ptr::null_mut();
             let mut data_ptr = ptr::null_mut();
@@ -313,7 +295,7 @@ impl<K, V, H> HashMap<K, V, H>
             loop {
                 debug_assert!(!(*cur_meta).is_empty());
                 let data = &mut *data_ptr;
-                if data.key == key {
+                if data.key == key { // NOTE: Possible panic
                     let value_ptr = (&mut data.value) as *mut _;
                     return Some((key, ptr::replace(value_ptr, value)));
                 }
@@ -340,7 +322,7 @@ impl<K, V, H> HashMap<K, V, H>
     }
 
     unsafe fn find_previous(&self, target_hash: usize, data_ptr: *const Entry<K, V>) -> usize {
-        let mut their_hash = self.hash(&(*data_ptr).key) as usize;
+        let mut their_hash = self.hash(&(*data_ptr).key) as usize; // NOTE: Possible panic
         let mut prev_hash = 0;
         let mut before_meta = ptr::null();
         while split_hash(their_hash, self.capacity) != split_hash(target_hash, self.capacity) {
@@ -367,7 +349,7 @@ impl<K, V, H> HashMap<K, V, H>
     }
 
     pub fn remove(&mut self, key: &K) -> Option<(K, V)> {
-        let mut hash = self.hash(&key) as usize;
+        let mut hash = self.hash(&key) as usize; // NOTE: Possible panic
         unsafe {
             let mut cur_meta = ptr::null_mut();
             let mut data_ptr = ptr::null_mut();
@@ -378,7 +360,7 @@ impl<K, V, H> HashMap<K, V, H>
             }
             let mut prev_meta = cur_meta;
             loop {
-                if &(*data_ptr).key == key {
+                if &(*data_ptr).key == key { // NOTE: Possible panic
                     let data = ptr::read(data_ptr);
                     let mut prev_ptr;
                     loop {
@@ -408,7 +390,7 @@ impl<K, V, H> HashMap<K, V, H>
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
-        let mut hash = self.hash(&key) as usize;
+        let mut hash = self.hash(&key) as usize; // NOTE: Possible panic
         unsafe {
             let mut cur_meta = ptr::null();
             let mut data_ptr = ptr::null();
@@ -419,7 +401,7 @@ impl<K, V, H> HashMap<K, V, H>
             }
             loop {
                 let data = &*data_ptr;
-                if &data.key == key {
+                if &data.key == key { // NOTE: Possible panic
                     return Some(&data.value);
                 }
                 let jump = (*cur_meta).jump_length();
@@ -434,7 +416,7 @@ impl<K, V, H> HashMap<K, V, H>
 
     // TODO: Abstract over mutability. Needs HKT/GAT
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        let mut hash = self.hash(&key) as usize;
+        let mut hash = self.hash(&key) as usize; // NOTE: Possible panic
         unsafe {
             let mut cur_meta = ptr::null_mut();
             let mut data_ptr = ptr::null_mut();
@@ -445,7 +427,7 @@ impl<K, V, H> HashMap<K, V, H>
             }
             loop {
                 let data = &mut *data_ptr;
-                if &data.key == key {
+                if &data.key == key { // NOTE: Possible panic
                     return Some(&mut data.value);
                 }
                 let jump = (*cur_meta).jump_length();
@@ -463,17 +445,7 @@ impl<K, V, H> HashMap<K, V, H>
         let new_capacity = 2 * self.capacity;
         self.capacity = new_capacity;
         self.size = 0;
-        // TODO: This is inefficent
-        let mut data = Vec::with_capacity(new_capacity);
-        for _ in 0..new_capacity {
-            data.push(Cell {
-                meta: Metadatum::default(),
-                data: unsafe { mem::uninitialized() }, // TODO: Uninitialize
-            });
-        }
-        let ptr = data.as_mut_ptr();
-        mem::forget(data);
-        let old_ptr = mem::replace(&mut self.ptr, ptr);
+        let old_ptr = mem::replace(&mut self.ptr, allocate(new_capacity));
 
         unsafe {
             for cell in 0..old_capacity {
@@ -543,6 +515,20 @@ impl<K, V, H> HashMap<K, V, H>
             }
         }
     }
+}
+
+fn allocate<K, V>(capacity: usize) -> *mut Cell<K, V> {
+    // TODO: This is inefficent
+    let mut data = Vec::with_capacity(capacity);
+    for _ in 0..capacity {
+        data.push(Cell {
+            meta: Metadatum::default(),
+            data: unsafe { mem::uninitialized() },
+        });
+    }
+    let ptr = data.as_mut_ptr();
+    mem::forget(data);
+    ptr
 }
 
 fn split_hash(hash: usize, capacity: usize) -> (isize, usize) {
