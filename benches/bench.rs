@@ -111,35 +111,61 @@ fn remove<H: Map>(b: &mut criterion::Bencher, max: u32) {
     })
 }
 
-fn criterion_benchmark(c: &mut Criterion) {
-    let max = 400_000;
+fn comparisons(c: &mut Criterion) {
+    let max = 800_000;
     let data_points = 40;
     let checks = (1..).map(|n| n * (max / data_points)).take(data_points as usize).collect::<Vec<_>>();
     c.bench(
-        "get/hit",
+        "compare/get/hit",
         ParameterizedBenchmark::new("bytell-hash-map", |b, size| get_hit::<BytellHashMap>(b, *size), checks.clone())
             .with_function("hash-map", |b, size| get_hit::<HashMap>(b, *size))
             .throughput(|n| Throughput::Elements(*n)),
     );
     c.bench(
-        "get/miss",
+        "compare/get/miss",
         ParameterizedBenchmark::new("bytell-hash-map", |b, size| get_miss::<BytellHashMap>(b, *size), checks.clone())
             .with_function("hash-map", |b, size| get_miss::<HashMap>(b, *size))
             .throughput(|n| Throughput::Elements(*n)),
     );
     c.bench(
-        "insert",
+        "compare/insert",
         ParameterizedBenchmark::new("bytell-hash-map", |b, size| insert::<BytellHashMap>(b, *size), checks.clone())
             .with_function("hash-map", |b, size| insert::<HashMap>(b, *size))
             .throughput(|n| Throughput::Elements(*n)),
     );
     c.bench(
-        "remove",
+        "compare/remove",
         ParameterizedBenchmark::new("bytell-hash-map", |b, size| remove::<BytellHashMap>(b, *size), checks)
             .with_function("hash-map", |b, size| remove::<HashMap>(b, *size))
             .throughput(|n| Throughput::Elements(*n)),
     );
 }
 
-criterion_group!(benches, criterion_benchmark);
+fn benchmarks(c: &mut Criterion) {
+    let max = 800_000;
+    let data_points = 80;
+    let checks = (1..).map(|n| n * (max / data_points)).take(data_points as usize).collect::<Vec<_>>();
+    c.bench(
+        "bench/get/hit",
+        ParameterizedBenchmark::new("bytell-hash-map", |b, size| get_hit::<BytellHashMap>(b, *size), checks.clone())
+            .throughput(|n| Throughput::Elements(*n)),
+    );
+    c.bench(
+        "bench/get/miss",
+        ParameterizedBenchmark::new("bytell-hash-map", |b, size| get_miss::<BytellHashMap>(b, *size), checks.clone())
+            .throughput(|n| Throughput::Elements(*n)),
+    );
+    c.bench(
+        "bench/insert",
+        ParameterizedBenchmark::new("bytell-hash-map", |b, size| insert::<BytellHashMap>(b, *size), checks.clone())
+            .throughput(|n| Throughput::Elements(*n)),
+    );
+    c.bench(
+        "bench/remove",
+        ParameterizedBenchmark::new("bytell-hash-map", |b, size| remove::<BytellHashMap>(b, *size), checks)
+            .throughput(|n| Throughput::Elements(*n)),
+    );
+}
+
+criterion_group!(benches, comparisons, benchmarks);
 criterion_main!(benches);
