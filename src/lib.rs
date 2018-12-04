@@ -3,7 +3,7 @@ extern crate fnv;
 #[cfg(test)]
 extern crate rand;
 
-use std::mem;
+use std::mem::{self, ManuallyDrop};
 use std::ptr;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::fmt;
@@ -103,7 +103,20 @@ struct Datum<K, V>([Entry<K, V>; BLOCK_SIZE]);
 
 struct Cell<K, V> {
     meta: Metadatum,
-    data: Datum<K, V>
+    data: ManuallyDrop<Datum<K, V>>
+}
+
+impl<K, V> Drop for Cell<K, V> {
+    fn drop(&mut self) {
+        unsafe {
+            for slot in 0..BLOCK_SIZE {
+                if !self.meta.0[slot].is_empty() {
+                    let datum_ptr = self.data.0.as_mut().as_mut_ptr();
+                    datum_ptr.offset(slot as isize).drop_in_place();
+                }
+            }
+        }
+    }
 }
 
 pub struct HashMap<K, V, H> {
@@ -116,15 +129,6 @@ pub struct HashMap<K, V, H> {
 impl<K, V, H> Drop for HashMap<K, V, H> {
     fn drop(&mut self) {
         unsafe {
-            for cell in 0..self.capacity {
-                let cur_cell = self.ptr.offset(cell as isize);
-                for slot in 0..BLOCK_SIZE {
-                    if !(*cur_cell).meta.0[slot].is_empty() {
-                        let datum_ptr = (*cur_cell).data.0.as_mut().as_mut_ptr();
-                        datum_ptr.offset(slot as isize).drop_in_place();
-                    }
-                }
-            }
             drop(Vec::from_raw_parts(self.ptr, 0, self.capacity));
         }
     }
@@ -452,6 +456,7 @@ impl<K, V, H> HashMap<K, V, H>
                 let cur_cell = old_ptr.offset(cell as isize);
                 for slot in 0..BLOCK_SIZE {
                     if !&(*cur_cell).meta.0[slot].is_empty() {
+                        (*cur_cell).meta.0[slot].set_empty();
                         let datum_ptr = (*cur_cell).data.0.as_ref().as_ptr();
                         let data_ptr = datum_ptr.offset(slot as isize);
                         let entry = ptr::read(data_ptr);
